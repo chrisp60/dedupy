@@ -1,0 +1,5 @@
+format_strings = true
+wrap_comments = true
+format_code_in_doc_comments = true
+unstable_features = true
+format_macro_bodies = true
