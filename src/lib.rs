@@ -85,14 +85,22 @@ impl RefSale<'_> {
 }
 
 /// An owned transaction.
+// These fields are in the order that they were specified in the original
+// email. I do not know if they are read by index or by header. I guess
+// this is the safest way to do it.
 #[derive(Debug, Deserialize, Serialize, Hash, Eq, PartialEq, PartialOrd, Ord)]
 struct Sale {
-    sku: String,
-    #[serde(serialize_with = "cents_to_dollars")]
-    unit_cents: i64,
-    quantity: i64,
-    description: String,
+    #[serde(rename = "Type")]
     kind: String,
+    #[serde(rename = "SKU")]
+    sku: String,
+    #[serde(rename = "Description")]
+    description: String,
+    #[serde(rename = "Quantity")]
+    quantity: i64,
+    // Originally canoverted all dollars to cents, so now we reverse
+    #[serde(serialize_with = "cents_to_dollars", rename = "Total")]
+    unit_cents: i64,
 }
 
 /// Helper function to serialize cents to dollars.
@@ -133,7 +141,9 @@ impl Bucket {
             mut sales, hashes, ..
         } = self;
 
-        let time = chrono::Local::now().to_rfc3339().replace(":", "_");
+        // These date strings are valid on linux but fail on windows.
+        // I could cfg' this but who wants colons in their filename anyways.
+        let time = chrono::Local::now().to_rfc3339().replace(':', "_");
         let mut writer = csv::WriterBuilder::new()
             .delimiter(b'\t')
             .from_path(format!("OUTPUT-{time}.tsv"))?;
