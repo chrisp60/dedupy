@@ -184,6 +184,7 @@ impl Bucket {
 
         // Handle writing the second pass of transactions without a sku.
         for (mut sale, cents) in without_sku.drain() {
+            sale.unit_cents = cents;
             if sale.unit_cents.is_negative() {
                 sale.quantity = -1
             } else {
@@ -192,7 +193,6 @@ impl Bucket {
             // Per request.
             sale.sku = "FBATF".to_string();
             // Where cents is the hashmaps value that was being aggregated.
-            sale.unit_cents = cents;
             writer.serialize(sale)?;
         }
 
