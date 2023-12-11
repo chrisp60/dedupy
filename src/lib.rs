@@ -134,7 +134,7 @@ impl Bucket {
         }
     }
 
-    /// Flushes the bucket to disk.
+    /// Flushes the bucket to disk. This is where most of the logic lives.
     #[instrument]
     fn flush(self) -> eyre::Result<()> {
         let Bucket {
@@ -159,16 +159,25 @@ impl Bucket {
             if sale.sku.is_empty() {
                 // Set the quantity to 0 so it can be used as a key.
                 // Extract the cents and add them to the hashmap's value.
-                let scents = sale.unit_cents;
+                let cents_value = sale.unit_cents;
                 sale.unit_cents = 0;
                 match without_sku.get_mut(&sale) {
-                    Some(cents) => *cents += scents,
+                    Some(cents) => *cents += cents_value,
                     None => {
-                        without_sku.insert(sale, scents);
+                        without_sku.insert(sale, cents_value);
                     }
                 }
             } else {
+                // All sales had their unit priced derived from their total
+                // so we need to undo that here.
+                //
+                // We do NOT need to do this for items without a sku
+                // as they are aggregated on the second pass by virtue of
+                // updating the hashmap's value.
                 sale.quantity = quantity;
+                if sale.quantity != 0 {
+                    sale.unit_cents *= quantity;
+                }
                 writer.serialize(sale)?;
             }
         }
@@ -182,6 +191,7 @@ impl Bucket {
             }
             // Per request.
             sale.sku = "FBATF".to_string();
+            // Where cents is the hashmaps value that was being aggregated.
             sale.unit_cents = cents;
             writer.serialize(sale)?;
         }
@@ -196,8 +206,6 @@ impl Bucket {
             .open("memory")?;
         // TODO: is this buffered? Does it need to be?
         // Doesnt this technically write the hash as a string?
-        // I think I want to write the bytes but how would a newline be
-        // written?
         for hash in hashes {
             writeln!(write, "{}", hash)?;
         }
