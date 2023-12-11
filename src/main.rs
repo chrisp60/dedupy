@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use std::env::current_dir;
+
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eyre::Result<()> {
@@ -11,8 +13,13 @@ fn main() -> eyre::Result<()> {
             dedupy::Report::parse(path)?;
         }
         None => {
-            let picks = rfd::FileDialog::new().pick_files();
-            let Some(files) = picks else {
+            let file_picker = rfd::FileDialog::new()
+                .add_filter("csv", &["csv"])
+                .set_directory(current_dir()?)
+                .set_title("Select a transaction report")
+                .pick_files();
+
+            let Some(files) = file_picker else {
                 tracing::info!("No files selected, exiting.");
                 return Ok(());
             };
