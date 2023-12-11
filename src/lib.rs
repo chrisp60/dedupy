@@ -133,7 +133,7 @@ impl Bucket {
             mut sales, hashes, ..
         } = self;
 
-        let time = chrono::Local::now().to_rfc3339();
+        let time = chrono::Local::now().to_rfc3339().replace(":", "_");
         let mut writer = csv::WriterBuilder::new()
             .delimiter(b'\t')
             .from_path(format!("OUTPUT-{time}.tsv"))?;

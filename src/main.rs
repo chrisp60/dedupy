@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eyre::Result<()> {
@@ -12,11 +13,11 @@ fn main() -> eyre::Result<()> {
         None => {
             let picks = rfd::FileDialog::new().pick_files();
             let Some(files) = picks else {
-                println!("No files selected, exiting.");
+                tracing::info!("No files selected, exiting.");
                 return Ok(());
             };
             for file in files {
-                println!("Parsing {:?}", file.display());
+                tracing::info!("Parsing {:?}", file.display());
                 dedupy::Report::parse(file)?;
             }
         }
