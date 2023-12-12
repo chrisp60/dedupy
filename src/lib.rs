@@ -10,7 +10,7 @@ use std::{
 
 use seahash::hash;
 use serde::{Deserialize, Serialize};
-use tracing::instrument;
+use tracing::{instrument, trace};
 
 /// A set of hashes of transactions that have already been written to disk.
 #[derive(Debug)]
@@ -141,21 +141,15 @@ impl Bucket {
             mut sales, hashes, ..
         } = self;
 
-        // These date strings are valid on linux but fail on windows.
-        // I could cfg' this but who wants colons in their filename anyways.
-        let time = chrono::Local::now().to_rfc3339().replace(':', "_");
-        let mut writer = csv::WriterBuilder::new()
-            .delimiter(b'\t')
-            .from_path(format!("OUTPUT-{time}.tsv"))?;
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let ws = wb.add_worksheet();
+        ws.serialize_headers(0, 0, &Sale::default())?;
 
         // Can write all sales with a sku immediately.
         // Make a second pass to write sales without a sku after further
         // consolidation.
         let mut without_sku = HashMap::<Sale, i64>::new();
-
-        // Drain the hashmap of sales with skus into the writer.
-        // Branching on empty skus into a second pass.
-        for (mut sale, quantity) in sales.drain() {
+        let mut folded_sales = sales.drain().fold(vec![], |mut acc, (mut sale, quantity)| {
             if sale.sku.is_empty() {
                 // Set the quantity to 0 so it can be used as a key.
                 // Extract the cents and add them to the hashmap's value.
@@ -178,9 +172,10 @@ impl Bucket {
                 if sale.quantity != 0 {
                     sale.unit_cents *= quantity;
                 }
-                writer.serialize(sale)?;
+                acc.push(sale);
             }
-        }
+            acc
+        });
 
         // Handle writing the second pass of transactions without a sku.
         for (mut sale, cents) in without_sku.drain() {
@@ -193,10 +188,15 @@ impl Bucket {
             // Per request.
             sale.sku = "FBATF".to_string();
             // Where cents is the hashmaps value that was being aggregated.
-            writer.serialize(sale)?;
+            folded_sales.push(sale);
         }
+        folded_sales.sort_unstable_by_key(|item| (item.kind.clone(), item.description.clone()));
 
-        writer.flush()?;
+        // These date strings are valid on linux but fail on windows.
+        // I could cfg' this but who wants colons in their filename anyways.
+        let time = chrono::Local::now().to_rfc3339().replace([':', '.'], "_");
+        let output_file_name = format!("OUTPUT-{time}.xlsx");
+        wb.save(&output_file_name)?;
 
         // Only after producing aggregated output do we write the hashes.
         let mut write = OpenOptions::new()
