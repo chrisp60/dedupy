@@ -88,7 +88,7 @@ impl RefSale<'_> {
 // These fields are in the order that they were specified in the original
 // email. I do not know if they are read by index or by header. I guess
 // this is the safest way to do it.
-#[derive(Debug, Deserialize, Serialize, Hash, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Debug, Deserialize, Serialize, Hash, Eq, PartialEq, PartialOrd, Ord, Default)]
 struct Sale {
     #[serde(rename = "Type")]
     kind: String,
@@ -204,10 +204,15 @@ impl Bucket {
             .write(true)
             .append(true)
             .open("memory")?;
+
         // TODO: is this buffered? Does it need to be?
         // Doesnt this technically write the hash as a string?
         for hash in hashes {
-            writeln!(write, "{}", hash)?;
+            if cfg!(debug_assertions) {
+                trace!("Skipping hash while in debug mode: {}", hash);
+            } else {
+                writeln!(write, "{}", hash)?;
+            }
         }
         Ok(())
     }
