@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::env::current_dir;
 
+#[allow(unused)]
+use tracing::{debug, error, info, instrument, trace, warn, Level};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eyre::Result<()> {
@@ -8,8 +10,10 @@ fn main() -> eyre::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     let mut args = std::env::args();
+    trace!(?args);
     match args.nth(1) {
         Some(path) => {
+            trace!(path);
             dedupy::Report::parse(path)?;
         }
         None => {

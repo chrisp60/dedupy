@@ -10,19 +10,22 @@ use std::{
 
 use seahash::hash;
 use serde::{Deserialize, Serialize};
-use tracing::{instrument, trace};
 
 /// A set of hashes of transactions that have already been written to disk.
 #[derive(Debug)]
 struct Memory(HashSet<u64>);
 
 impl Memory {
-    fn has_hash(&self, hash: &u64) -> bool {
-        self.0.contains(hash)
+    #[inline(always)]
+    fn has_hash(&self, hash: u64) -> bool {
+        if self.0.is_empty() {
+            false
+        } else {
+            self.0.contains(&hash)
+        }
     }
 
     /// Returns a new [`Memory`] instance.
-    #[instrument]
     fn new() -> eyre::Result<Self> {
         match csv::Reader::from_path("memory") {
             Ok(mut rdr) => {
@@ -53,7 +56,6 @@ struct RefSale<'a> {
 
 impl RefSale<'_> {
     /// Returns the total cents of the transaction.
-    #[instrument]
     fn total_cents(&self) -> Result<i64, eyre::Error> {
         // To avoid floating point errors we parse the total price into cents.
         // This is undone when writing the final output.
@@ -61,7 +63,6 @@ impl RefSale<'_> {
     }
 
     /// Returns the quantity of the transaction.
-    #[instrument]
     fn quantity(&self) -> Result<i64, eyre::Error> {
         if !self.quantity.is_empty() {
             Ok(self.quantity.parse::<i64>()?)
@@ -74,7 +75,6 @@ impl RefSale<'_> {
     ///
     /// This is the total cents divided by the quantity unless the quantity
     /// is zero, in which case the total cents is returned.
-    #[instrument]
     fn unit_cents(&self) -> Result<i64, eyre::Error> {
         if self.quantity()? == 0 {
             Ok(self.total_cents()?)
@@ -126,7 +126,6 @@ struct Bucket {
 
 impl Bucket {
     /// Returns a new [`Bucket`] instance.
-    #[instrument]
     fn new() -> Self {
         Self {
             sales: HashMap::new(),
@@ -135,21 +134,16 @@ impl Bucket {
     }
 
     /// Flushes the bucket to disk. This is where most of the logic lives.
-    #[instrument]
     fn flush(self) -> eyre::Result<()> {
-        let Bucket {
-            mut sales, hashes, ..
-        } = self;
-
-        let mut wb = rust_xlsxwriter::Workbook::new();
-        let ws = wb.add_worksheet();
-        ws.serialize_headers(0, 0, &Sale::default())?;
+        let Bucket { sales, hashes, .. } = self;
 
         // Can write all sales with a sku immediately.
         // Make a second pass to write sales without a sku after further
         // consolidation.
         let mut without_sku = HashMap::<Sale, i64>::new();
-        let mut folded_sales = sales.drain().fold(vec![], |mut acc, (mut sale, quantity)| {
+        let mut finished = vec![];
+
+        for (mut sale, quantity) in sales.into_iter() {
             if sale.sku.is_empty() {
                 // Set the quantity to 0 so it can be used as a key.
                 // Extract the cents and add them to the hashmap's value.
@@ -172,13 +166,12 @@ impl Bucket {
                 if sale.quantity != 0 {
                     sale.unit_cents *= quantity;
                 }
-                acc.push(sale);
+                finished.push(sale);
             }
-            acc
-        });
+        }
 
         // Handle writing the second pass of transactions without a sku.
-        for (mut sale, cents) in without_sku.drain() {
+        for (mut sale, cents) in without_sku.into_iter() {
             sale.unit_cents = cents;
             if sale.unit_cents.is_negative() {
                 sale.quantity = -1
@@ -188,29 +181,38 @@ impl Bucket {
             // Per request.
             sale.sku = "FBATF".to_string();
             // Where cents is the hashmaps value that was being aggregated.
-            folded_sales.push(sale);
+            finished.push(sale);
         }
-        folded_sales.sort_unstable_by_key(|item| (item.kind.clone(), item.description.clone()));
+
+        // Per Request: sort by type and then description.
+        // TODO: it sucks to allocate two whole strings here.
+        finished.sort_unstable_by_key(|item| (item.kind.clone(), item.description.clone()));
+
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let ws = wb.add_worksheet();
+
+        ws.serialize_headers(0, 0, &Sale::default())?;
+        for sale in finished {
+            ws.serialize(&sale)?;
+        }
 
         // These date strings are valid on linux but fail on windows.
         // I could cfg' this but who wants colons in their filename anyways.
         let time = chrono::Local::now().to_rfc3339().replace([':', '.'], "_");
-        let output_file_name = format!("OUTPUT-{time}.xlsx");
-        wb.save(&output_file_name)?;
+        let output = format!("OUTPUT-{time}.xlsx");
+        wb.save(&output)?;
 
         // Only after producing aggregated output do we write the hashes.
-        let mut write = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open("memory")?;
+        if cfg!(not(debug_assertions)) {
+            let mut write = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open("memory")?;
 
-        // TODO: is this buffered? Does it need to be?
-        // Doesnt this technically write the hash as a string?
-        for hash in hashes {
-            if cfg!(debug_assertions) {
-                trace!("Skipping hash while in debug mode: {}", hash);
-            } else {
+            // TODO: is this buffered? Does it need to be?
+            // Doesnt this technically write the hash as a string?
+            for hash in hashes {
                 writeln!(write, "{}", hash)?;
             }
         }
@@ -218,7 +220,7 @@ impl Bucket {
     }
 
     /// Adds a transaction to the bucket.
-    #[instrument]
+    #[inline(always)]
     fn add(&mut self, sales_ref: &RefSale<'_>, hash: u64) -> eyre::Result<()> {
         let qt_value = sales_ref.quantity()?;
         self.hashes.push(hash);
@@ -275,10 +277,8 @@ impl Report {
         for record in records {
             let record = record?;
             let hash = hash(record.as_slice().as_bytes());
-            if !memory.has_hash(&hash) {
+            if !memory.has_hash(hash) {
                 let sale = record.deserialize(header.as_ref())?;
-                // Do not log the current hash to disk since we could crash
-                // prior to actually producing output of the transaction.
                 bucket.add(&sale, hash)?;
             }
         }
