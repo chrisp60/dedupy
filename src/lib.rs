@@ -177,13 +177,10 @@ impl Report {
                 let qt = sale.quantity;
                 let cents = handle_punct(sale.total)?;
                 match Trx::try_from(sale)? {
-                    Trx::Adjustment(a) => {
-                        dbg!(&cents);
-                        adjustmut_map
-                            .entry(a)
-                            .and_modify(|v| *v += cents)
-                            .or_insert(cents)
-                    }
+                    Trx::Adjustment(a) => adjustmut_map
+                        .entry(a)
+                        .and_modify(|v| *v += cents)
+                        .or_insert(cents),
                     Trx::WithSku(s) => {
                         skumem.memorize(&s.sku);
                         with_sku_map.entry(s).and_modify(|v| *v += qt).or_insert(qt)
@@ -199,7 +196,6 @@ impl Report {
             .into_iter()
             .map(|(k, v)| Sale::new(Trx::Adjustment(k), v))
             .collect::<Vec<_>>();
-        println!("adjustments: {:#?}", buffer);
         buffer.extend(
             with_sku_map
                 .into_iter()
