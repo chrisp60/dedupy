@@ -308,7 +308,6 @@ fn handle_punct(total: &str) -> eyre::Result<i64> {
 #[cfg(test)]
 mod test {
     use super::*;
-
     #[test]
     fn assert_punct() {
         assert_eq!(handle_punct("1.00").unwrap_or_default(), 100);
