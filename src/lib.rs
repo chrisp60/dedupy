@@ -149,7 +149,7 @@ impl Report {
         // The first 7 records of the report are trash.
         let mut iter = rdr.records().skip(7);
 
-        let mut adjustmut_map = HashMap::<Adjustment, Occurences>::new();
+        let mut adjustmut_map = HashMap::<Adjustment, Cents>::new();
         let mut with_sku_map = HashMap::<WithSku, Cents>::new();
 
         let mut recmem = Memory::new("memory")?;
@@ -161,10 +161,11 @@ impl Report {
             if !recmem.memorize(r.as_slice()) {
                 let sale = r.deserialize::<RefSale>(hdr.as_ref())?;
                 let qt = sale.quantity;
+                let cents = handle_punct(sale.total)?;
                 match Trx::try_from(sale)? {
                     Trx::Adjustment(a) => adjustmut_map
                         .entry(a)
-                        .and_modify(|v| *v += qt)
+                        .and_modify(|v| *v += cents)
                         .or_insert(qt),
                     Trx::WithSku(s) => {
                         skumem.memorize(&s.sku);
