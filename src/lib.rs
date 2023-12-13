@@ -51,13 +51,25 @@ impl Memory {
 /// A reference to a transaction from the input CSV.
 #[derive(Deserialize, Serialize, Debug)]
 struct RefSale<'a> {
-    #[serde(alias = "type")]
+    #[serde(alias = "type", default)]
     kind: String,
     sku: Option<String>,
     total: &'a str,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_quantity")]
     quantity: i64,
     description: String,
+}
+
+fn deserialize_quantity<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.is_empty() {
+        Ok(0)
+    } else {
+        s.parse::<i64>().map_err(serde::de::Error::custom)
+    }
 }
 
 /// An owned transaction.
