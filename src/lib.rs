@@ -6,8 +6,9 @@ use std::{
     path::Path,
 };
 
+use rust_xlsxwriter::Workbook;
 use seahash::hash;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct as _, Deserialize, Serialize};
 
 /// A set of hashes of transactions that have already been written to disk.
 #[derive(Debug)]
@@ -62,19 +63,30 @@ struct RefSale<'a> {
 // These fields are in the order that they were specified in the original
 // email. I do not know if they are read by index or by header. I guess
 // this is the safest way to do it.
-#[derive(Debug, Deserialize, Serialize, Hash, Eq, PartialEq, PartialOrd, Ord, Default)]
+#[derive(Debug, Deserialize, Hash, Eq, PartialEq, PartialOrd, Ord, Default)]
 struct Sale {
-    #[serde(rename = "Type")]
     kind: String,
-    #[serde(rename = "SKU")]
     sku: String,
-    #[serde(rename = "Description")]
     description: String,
-    #[serde(rename = "Quantity", default)]
+    #[serde(default)]
     quantity: i64,
-    // Originally canoverted all dollars to cents, so now we reverse
-    #[serde(serialize_with = "to_dollars", rename = "Total")]
     cents: i64,
+}
+
+impl Serialize for Sale {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Sale", 5)?;
+        // This will not panic since we derived it from an f64
+        s.serialize_field("Type", &self.kind)?;
+        s.serialize_field("SKU", &self.sku)?;
+        s.serialize_field("Description", &self.description)?;
+        s.serialize_field("Quantity", &self.quantity)?;
+        s.serialize_field("Total", &(self.cents as f64 / 100.0))?;
+        s.end()
+    }
 }
 
 impl Sale {
@@ -103,17 +115,6 @@ impl Sale {
     }
 }
 
-/// Helper function to serialize cents to dollars.
-fn to_dollars<S>(cents: &i64, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    // TODO: Would this ever panic?;
-    let v = (*cents as f64) / 100.0;
-    let mut buffer = ryu::Buffer::new();
-    serializer.serialize_str(buffer.format(v))
-}
-
 /// Entry point for the library.
 pub struct Report;
 
@@ -123,10 +124,9 @@ impl Report {
     where
         P: AsRef<Path> + std::fmt::Debug,
     {
-        let read_file = std::fs::read(&path)?;
-
         // Cannot guarantee the file is utf8, if anything we know it's not.
-        let read = String::from_utf8_lossy(&read_file);
+        let file = std::fs::read(&path)?;
+        let read = String::from_utf8_lossy(&file);
 
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(false)
@@ -175,8 +175,7 @@ impl Report {
         );
 
         buffer.sort_unstable_by_key(|s| (s.kind.clone(), s.description.clone()));
-        eprintln!("{buffer:#?}");
-        let mut wb = rust_xlsxwriter::Workbook::new();
+        let mut wb = Workbook::new();
         let worksheet = wb.add_worksheet();
         worksheet.serialize_headers(0, 0, &Sale::default())?;
         for sale in buffer {
@@ -188,6 +187,7 @@ impl Report {
     }
 }
 
+#[derive(Debug)]
 enum Trx {
     Adjustment(Adjustment),
     WithSku(WithSku),
@@ -206,7 +206,7 @@ impl TryFrom<RefSale<'_>> for Trx {
 type Cents = i64;
 type Occurences = i64;
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(Debug, Hash, Eq, PartialEq)]
 struct Adjustment {
     kind: String,
     description: String,
@@ -222,7 +222,7 @@ impl TryFrom<RefSale<'_>> for Adjustment {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(Debug, Hash, Eq, PartialEq)]
 struct WithSku {
     kind: String,
     sku: String,
