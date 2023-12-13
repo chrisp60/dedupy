@@ -3,8 +3,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs::OpenOptions,
-    io::Write,
     path::Path,
 };
 
@@ -13,75 +11,51 @@ use serde::{Deserialize, Serialize};
 
 /// A set of hashes of transactions that have already been written to disk.
 #[derive(Debug)]
-struct Memory(HashSet<u64>);
+struct Memory {
+    set: HashSet<u64>,
+    path: &'static str,
+}
 
 impl Memory {
-    #[inline(always)]
-    fn has_hash(&self, hash: u64) -> bool {
-        if self.0.is_empty() {
-            false
-        } else {
-            self.0.contains(&hash)
-        }
+    fn memorize<S>(&mut self, s: S) -> bool
+    where
+        S: AsRef<str>,
+    {
+        let hash = hash(s.as_ref().as_bytes());
+        self.set.insert(hash)
     }
 
     /// Returns a new [`Memory`] instance.
-    fn new() -> eyre::Result<Self> {
-        match csv::Reader::from_path("memory") {
-            Ok(mut rdr) => {
-                let mut records = HashSet::new();
-                for record in rdr.records() {
-                    let rcd = record?;
-                    records.insert(rcd.deserialize(None)?);
-                }
-                Ok(Self(records))
-            }
-            Err(_) => Ok(Self(HashSet::new())),
+    fn new(path: &'static str) -> eyre::Result<Self> {
+        let set = csv::Reader::from_path(path)
+            .and_then(|mut val| {
+                val.deserialize::<u64>()
+                    .collect::<Result<HashSet<u64>, _>>()
+            })
+            .unwrap_or_default();
+        Ok(Self { path, set })
+    }
+
+    fn write(self) -> eyre::Result<()> {
+        let mut wtr = csv::Writer::from_path(self.path)?;
+        for v in &self.set {
+            wtr.serialize(v)?;
         }
+        wtr.flush()?;
+        Ok(())
     }
 }
 
 /// A reference to a transaction from the input CSV.
 #[derive(Deserialize, Serialize, Debug)]
 struct RefSale<'a> {
-    #[serde(alias = "date/time")]
-    date_time: &'a str,
     #[serde(alias = "type")]
-    kind: &'a str,
-    sku: &'a str,
+    kind: String,
+    sku: Option<String>,
     total: &'a str,
-    quantity: &'a str,
-    description: &'a str,
-}
-
-impl RefSale<'_> {
-    /// Returns the total cents of the transaction.
-    fn total_cents(&self) -> Result<i64, eyre::Error> {
-        // To avoid floating point errors we parse the total price into cents.
-        // This is undone when writing the final output.
-        Ok(self.total.replace(['.', ','], "").parse::<i64>()?)
-    }
-
-    /// Returns the quantity of the transaction.
-    fn quantity(&self) -> Result<i64, eyre::Error> {
-        if !self.quantity.is_empty() {
-            Ok(self.quantity.parse::<i64>()?)
-        } else {
-            Ok(0)
-        }
-    }
-
-    /// Returns the unit value of the transaction.
-    ///
-    /// This is the total cents divided by the quantity unless the quantity
-    /// is zero, in which case the total cents is returned.
-    fn unit_cents(&self) -> Result<i64, eyre::Error> {
-        if self.quantity()? == 0 {
-            Ok(self.total_cents()?)
-        } else {
-            Ok(self.total_cents()? / self.quantity()?)
-        }
-    }
+    #[serde(default)]
+    quantity: i64,
+    description: String,
 }
 
 /// An owned transaction.
@@ -96,15 +70,41 @@ struct Sale {
     sku: String,
     #[serde(rename = "Description")]
     description: String,
-    #[serde(rename = "Quantity")]
+    #[serde(rename = "Quantity", default)]
     quantity: i64,
     // Originally canoverted all dollars to cents, so now we reverse
-    #[serde(serialize_with = "cents_to_dollars", rename = "Total")]
-    unit_cents: i64,
+    #[serde(serialize_with = "to_dollars", rename = "Total")]
+    cents: i64,
+}
+
+impl Sale {
+    fn new(t: Trx, i: i64) -> Self {
+        match t {
+            Trx::Adjustment(a) => Self {
+                kind: a.kind,
+                sku: "FBATF".to_string(),
+                description: a.description,
+                quantity: if i < 0 { -1 } else { 1 },
+                cents: i,
+            },
+            Trx::WithSku(WithSku {
+                kind,
+                sku,
+                cents,
+                description,
+            }) => Self {
+                kind,
+                sku,
+                description,
+                quantity: i,
+                cents: cents * i,
+            },
+        }
+    }
 }
 
 /// Helper function to serialize cents to dollars.
-fn cents_to_dollars<S>(cents: &i64, serializer: S) -> Result<S::Ok, S::Error>
+fn to_dollars<S>(cents: &i64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -112,138 +112,6 @@ where
     let v = (*cents as f64) / 100.0;
     let mut buffer = ryu::Buffer::new();
     serializer.serialize_str(buffer.format(v))
-}
-
-/// A bucket to aggregate sales before writing to disk.
-///
-/// Additionally, holds hashes of transactions from the current run.
-#[derive(Debug, Default)]
-struct Bucket {
-    // buffer to aggregate sales before writing to disk
-    sales: HashMap<Sale, i64>,
-    hashes: Vec<u64>,
-}
-
-impl Bucket {
-    /// Returns a new [`Bucket`] instance.
-    fn new() -> Self {
-        Self {
-            sales: HashMap::new(),
-            hashes: Vec::new(),
-        }
-    }
-
-    /// Flushes the bucket to disk. This is where most of the logic lives.
-    fn flush(self) -> eyre::Result<()> {
-        let Bucket { sales, hashes, .. } = self;
-
-        // Can write all sales with a sku immediately.
-        // Make a second pass to write sales without a sku after further
-        // consolidation.
-        let mut without_sku = HashMap::<Sale, i64>::new();
-        let mut finished = vec![];
-
-        for (mut sale, quantity) in sales.into_iter() {
-            if sale.sku.is_empty() {
-                // Set the quantity to 0 so it can be used as a key.
-                // Extract the cents and add them to the hashmap's value.
-                let cents_value = sale.unit_cents;
-                sale.unit_cents = 0;
-                match without_sku.get_mut(&sale) {
-                    Some(cents) => *cents += cents_value,
-                    None => {
-                        without_sku.insert(sale, cents_value);
-                    }
-                }
-            } else {
-                // All sales had their unit priced derived from their total
-                // so we need to undo that here.
-                //
-                // We do NOT need to do this for items without a sku
-                // as they are aggregated on the second pass by virtue of
-                // updating the hashmap's value.
-                sale.quantity = quantity;
-                if sale.quantity != 0 {
-                    sale.unit_cents *= quantity;
-                }
-                finished.push(sale);
-            }
-        }
-
-        // Handle writing the second pass of transactions without a sku.
-        for (mut sale, cents) in without_sku.into_iter() {
-            sale.unit_cents = cents;
-            if sale.unit_cents.is_negative() {
-                sale.quantity = -1
-            } else {
-                sale.quantity = 1;
-            }
-            // Per request.
-            sale.sku = "FBATF".to_string();
-            // Where cents is the hashmaps value that was being aggregated.
-            finished.push(sale);
-        }
-
-        // Per Request: sort by type and then description.
-        // TODO: it sucks to allocate two whole strings here.
-        finished.sort_unstable_by_key(|item| (item.kind.clone(), item.description.clone()));
-
-        let mut wb = rust_xlsxwriter::Workbook::new();
-        let ws = wb.add_worksheet();
-
-        ws.serialize_headers(0, 0, &Sale::default())?;
-        for sale in finished {
-            ws.serialize(&sale)?;
-        }
-
-        // These date strings are valid on linux but fail on windows.
-        // I could cfg' this but who wants colons in their filename anyways.
-        let time = chrono::Local::now().to_rfc3339().replace([':', '.'], "_");
-        let output = format!("OUTPUT-{time}.xlsx");
-        wb.save(&output)?;
-
-        // Only after producing aggregated output do we write the hashes.
-        if cfg!(not(debug_assertions)) {
-            let mut write = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open("memory")?;
-
-            // TODO: is this buffered? Does it need to be?
-            // Doesnt this technically write the hash as a string?
-            for hash in hashes {
-                writeln!(write, "{}", hash)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Adds a transaction to the bucket.
-    #[inline(always)]
-    fn add(&mut self, sales_ref: &RefSale<'_>, hash: u64) -> eyre::Result<()> {
-        let qt_value = sales_ref.quantity()?;
-        self.hashes.push(hash);
-        let sale = Sale {
-            sku: sales_ref.sku.to_string(),
-            unit_cents: sales_ref.unit_cents()?,
-            // This is a placeholder value that will be overwritten
-            // before writing to disk. The value is being summed as the
-            // hashmap's value.
-            quantity: 0,
-            description: sales_ref.description.to_string(),
-            kind: sales_ref.kind.to_string(),
-        };
-        // If the sale is already in the hashmap, add the quantity.
-        // Otherwise insert the sale into the hashmap.
-        match self.sales.get_mut(&sale) {
-            Some(quantity) => *quantity += qt_value,
-            None => {
-                self.sales.insert(sale, qt_value);
-            }
-        };
-        Ok(())
-    }
 }
 
 /// Entry point for the library.
@@ -255,9 +123,6 @@ impl Report {
     where
         P: AsRef<Path> + std::fmt::Debug,
     {
-        let mut bucket = Bucket::new();
-        let memory = Memory::new()?;
-
         let read_file = std::fs::read(&path)?;
 
         // Cannot guarantee the file is utf8, if anything we know it's not.
@@ -269,21 +134,122 @@ impl Report {
             .from_reader(read.as_bytes());
 
         // The first 7 records of the report are trash.
-        let mut records = rdr.records().skip(7);
+        let mut iter = rdr.records().skip(7);
 
-        // Yank out the headers for deserialization.
-        let header = records.next().transpose()?;
+        let mut adjustmut_map = HashMap::<Adjustment, Occurences>::new();
+        let mut with_sku_map = HashMap::<WithSku, Cents>::new();
 
-        for record in records {
-            let record = record?;
-            let hash = hash(record.as_slice().as_bytes());
-            if !memory.has_hash(hash) {
-                let sale = record.deserialize(header.as_ref())?;
-                bucket.add(&sale, hash)?;
+        let mut recmem = Memory::new("memory")?;
+        let mut skumem = Memory::new("sku_memory")?;
+
+        let hdr = iter.next().transpose()?;
+        for record in iter {
+            let r = &record?;
+            if !recmem.memorize(r.as_slice()) {
+                let sale = r.deserialize::<RefSale>(hdr.as_ref())?;
+                let qt = sale.quantity;
+                match Trx::try_from(sale)? {
+                    Trx::Adjustment(a) => adjustmut_map
+                        .entry(a)
+                        .and_modify(|v| *v += qt)
+                        .or_insert(qt),
+                    Trx::WithSku(s) => {
+                        skumem.memorize(&s.sku);
+                        with_sku_map.entry(s).and_modify(|v| *v += qt).or_insert(qt)
+                    }
+                };
             }
         }
 
-        bucket.flush()?;
+        recmem.write()?;
+        skumem.write()?;
+
+        let mut buffer = adjustmut_map
+            .into_iter()
+            .map(|(k, v)| Sale::new(Trx::Adjustment(k), v))
+            .collect::<Vec<_>>();
+        buffer.extend(
+            with_sku_map
+                .into_iter()
+                .map(|(k, v)| Sale::new(Trx::WithSku(k), v)),
+        );
+
+        buffer.sort_unstable_by_key(|s| (s.kind.clone(), s.description.clone()));
+        eprintln!("{buffer:#?}");
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let worksheet = wb.add_worksheet();
+        worksheet.serialize_headers(0, 0, &Sale::default())?;
+        for sale in buffer {
+            worksheet.serialize(&sale)?;
+        }
+
+        wb.save("output.xlsx")?;
         Ok(())
+    }
+}
+
+enum Trx {
+    Adjustment(Adjustment),
+    WithSku(WithSku),
+}
+
+impl TryFrom<RefSale<'_>> for Trx {
+    type Error = eyre::Error;
+    fn try_from(value: RefSale<'_>) -> Result<Self, Self::Error> {
+        match value.sku {
+            Some(_) => WithSku::try_from(value).map(Trx::WithSku),
+            None => Adjustment::try_from(value).map(Trx::Adjustment),
+        }
+    }
+}
+
+type Cents = i64;
+type Occurences = i64;
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash)]
+struct Adjustment {
+    kind: String,
+    description: String,
+}
+
+impl TryFrom<RefSale<'_>> for Adjustment {
+    type Error = eyre::Error;
+    fn try_from(value: RefSale<'_>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            kind: value.kind.to_string(),
+            description: value.description.to_string(),
+        })
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash)]
+struct WithSku {
+    kind: String,
+    sku: String,
+    cents: Cents,
+    description: String,
+}
+
+impl TryFrom<RefSale<'_>> for WithSku {
+    type Error = eyre::Error;
+    fn try_from(value: RefSale<'_>) -> Result<Self, Self::Error> {
+        let RefSale {
+            kind,
+            sku,
+            total,
+            quantity,
+            description,
+        } = value;
+
+        let total = total.replace(['.', ','], "").parse::<i64>()?;
+        // Div by 0 is None => cents
+        let cents = total.checked_div(quantity).unwrap_or(total);
+
+        Ok(Self {
+            kind,
+            sku: sku.expect("sku is some"),
+            cents,
+            description,
+        })
     }
 }
