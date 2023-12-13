@@ -6,6 +6,7 @@ use std::{
     path::Path,
 };
 
+use eyre::bail;
 use rust_xlsxwriter::Workbook;
 use seahash::hash;
 use serde::{ser::SerializeStruct as _, Deserialize, Serialize};
@@ -241,7 +242,8 @@ impl TryFrom<RefSale<'_>> for WithSku {
             description,
         } = value;
 
-        let total = total.replace(['.', ','], "").parse::<i64>()?;
+        let total = handle_punct(total)?;
+
         // Div by 0 is None => cents
         let cents = total.checked_div(quantity).unwrap_or(total);
 
@@ -251,5 +253,43 @@ impl TryFrom<RefSale<'_>> for WithSku {
             cents,
             description,
         })
+    }
+}
+
+fn handle_punct(total: &str) -> eyre::Result<i64> {
+    let punct = ['.', ','];
+    match total.split('.').nth(1) {
+        Some(dec) => {
+            let mul = match dec.chars().count() {
+                1 => 10,
+                2 => 1,
+                _ => bail!("invalid decimal"),
+            };
+            total
+                .replace(punct, "")
+                .parse::<i64>()
+                .map(|v| v * mul)
+                .map_err(Into::into)
+        }
+        None => total
+            .replace(punct, "")
+            .parse::<i64>()
+            .map(|v| v * 100)
+            .map_err(Into::into),
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn assert_punct() {
+        assert_eq!(handle_punct("1.00").unwrap_or_default(), 100);
+        assert_eq!(handle_punct("1.0").unwrap_or_default(), 100);
+        assert_eq!(handle_punct("1").unwrap_or_default(), 100);
+        assert_eq!(handle_punct("1,345.3").unwrap_or_default(), 134_530);
+        assert_eq!(handle_punct("0.30").unwrap_or_default(), 30);
+        assert!(handle_punct("0.300").is_err());
     }
 }
