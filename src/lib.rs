@@ -15,6 +15,7 @@ use serde::{ser::SerializeStruct as _, Deserialize, Serialize};
 #[derive(Debug)]
 struct Memory {
     set: HashSet<u64>,
+    side_set: HashSet<u64>,
     path: &'static str,
 }
 
@@ -24,23 +25,36 @@ impl Memory {
         S: AsRef<str>,
     {
         let hash = hash(s.as_ref().as_bytes());
-        self.set.insert(hash)
+        if self.set.contains(&hash) {
+            false
+        } else {
+            self.side_set.insert(hash);
+            true
+        }
     }
 
     /// Returns a new [`Memory`] instance.
     fn new(path: &'static str) -> eyre::Result<Self> {
+        let side_set = HashSet::<u64>::default();
         let set = csv::Reader::from_path(path)
             .and_then(|mut val| {
                 val.deserialize::<u64>()
                     .collect::<Result<HashSet<u64>, _>>()
             })
             .unwrap_or_default();
-        Ok(Self { path, set })
+        Ok(Self {
+            path,
+            side_set,
+            set,
+        })
     }
 
     fn write(self) -> eyre::Result<()> {
         let mut wtr = csv::Writer::from_path(self.path)?;
         for v in &self.set {
+            wtr.serialize(v)?;
+        }
+        for v in &self.side_set {
             wtr.serialize(v)?;
         }
         wtr.flush()?;
@@ -158,15 +172,18 @@ impl Report {
         let hdr = iter.next().transpose()?;
         for record in iter {
             let r = &record?;
-            if !recmem.memorize(r.as_slice()) {
+            if recmem.memorize(r.as_slice()) {
                 let sale = r.deserialize::<RefSale>(hdr.as_ref())?;
                 let qt = sale.quantity;
                 let cents = handle_punct(sale.total)?;
                 match Trx::try_from(sale)? {
-                    Trx::Adjustment(a) => adjustmut_map
-                        .entry(a)
-                        .and_modify(|v| *v += cents)
-                        .or_insert(qt),
+                    Trx::Adjustment(a) => {
+                        dbg!(&cents);
+                        adjustmut_map
+                            .entry(a)
+                            .and_modify(|v| *v += cents)
+                            .or_insert(cents)
+                    }
                     Trx::WithSku(s) => {
                         skumem.memorize(&s.sku);
                         with_sku_map.entry(s).and_modify(|v| *v += qt).or_insert(qt)
@@ -182,6 +199,7 @@ impl Report {
             .into_iter()
             .map(|(k, v)| Sale::new(Trx::Adjustment(k), v))
             .collect::<Vec<_>>();
+        println!("adjustments: {:#?}", buffer);
         buffer.extend(
             with_sku_map
                 .into_iter()
@@ -218,7 +236,6 @@ impl TryFrom<RefSale<'_>> for Trx {
 }
 
 type Cents = i64;
-type Occurences = i64;
 
 #[derive(Debug, Hash, Eq, PartialEq)]
 struct Adjustment {
