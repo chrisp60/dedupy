@@ -28,7 +28,9 @@ impl Memory {
                 .create(true)
                 .write(true)
                 .open(path)?;
-            for item in &self.diff {
+            let mut temp = self.diff.iter().collect::<Vec<_>>();
+            temp.sort();
+            for item in temp {
                 writeln!(file, "{}", item)?;
             }
         }
