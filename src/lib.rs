@@ -3,6 +3,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
     path::Path,
 };
 
@@ -16,10 +17,24 @@ use serde::{ser::SerializeStruct as _, Deserialize, Serialize};
 struct Memory {
     set: HashSet<u64>,
     side_set: HashSet<u64>,
+    diff: HashSet<String>,
     path: &'static str,
 }
 
 impl Memory {
+    fn write_difference(&self, path: &str) -> eyre::Result<()> {
+        if !self.diff.is_empty() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(path)?;
+            for item in &self.diff {
+                writeln!(file, "{}", item)?;
+            }
+        }
+        Ok(())
+    }
+
     fn memorize<S>(&mut self, s: S) -> bool
     where
         S: AsRef<str>,
@@ -29,6 +44,7 @@ impl Memory {
             false
         } else {
             self.side_set.insert(hash);
+            self.diff.insert(s.as_ref().to_string());
             true
         }
     }
@@ -46,6 +62,7 @@ impl Memory {
             path,
             side_set,
             set,
+            diff: HashSet::default(),
         })
     }
 
@@ -189,6 +206,10 @@ impl Report {
             }
         }
 
+        let date = chrono::Local::now()
+            .naive_local()
+            .format("%Y-%m-%d_%H-%M-%S");
+        skumem.write_difference(&format!("NEW_SKU_FOUND_{}.txt", date))?;
         recmem.write()?;
         skumem.write()?;
 
@@ -203,14 +224,16 @@ impl Report {
         );
 
         buffer.sort_unstable_by_key(|s| (s.kind.clone(), s.description.clone()));
+
         let mut wb = Workbook::new();
         let worksheet = wb.add_worksheet();
         worksheet.serialize_headers(0, 0, &Sale::default())?;
+
         for sale in buffer {
             worksheet.serialize(&sale)?;
         }
 
-        wb.save("output.xlsx")?;
+        wb.save(format!("AGGREGATED_{}.xlsx", date))?;
         Ok(())
     }
 }
