@@ -1,76 +1,51 @@
 # Dedupy
 
-Reads Unified Transaction Reports and outputs tidy tsv imports for Compass.
+- Reads a transaction report
+- Aggregates similar transactions and adjustments.
+- Remembers unique transactions to avoid "double-dipping" into same lime item.
+- Remembers unique SKUs and notifies when a new item exists in the aggregation.
 
-## Report Sanitization
 
-Amazon item descriptions are not guaranteed to be valid UTF8.
-A lazy conversion is done if invalid UTF8 bytes are read from the report.
-You probably don't need to worry about this. `U+FFFD` is used
-as the replacement character (looks like this: �).
+## Usage
 
-## Hashed Transactions
+1. Download a transaction report from Amazon.
+1. Double-click the application's icon, this will open a file browser on your
+   computer. The file browser is filtered to only show `.csv` files.
+1. Navigate to the downloaded transaction report using the file browser.
+1. Select or double-click the report.
+1. The application will process the report, skipping transactions that
+   have already been aggregated from a previous run.
+1. Once finished, the application will generate the following files.
+   1. `AGGREGATED_[TIMESTAMP].xlsx`: Aggregation of the selected report.
+   1. `NEW_SKU_FOUND_[TIMESTAMP].txt`: **Generated only if an unrecognized SKU was
+      encountered**.
+   1. `memory`: Encoded record of unique _transactions_ from this report, and
+      all previous reports.
+   1. `sku_memory`: Encoded record of unique _SKUs_ from this report, and
+      all previous reports.
+1. Take care to not delete the generated files with `memory` in the name.
+1. The application can be forced to _forget_ previously seen items by deleting
+   the memory file. These files will be replaced on the next run without
+   records of any runs before that.
 
-A hash is generated of each transaction new transaction that the application
-encounters. Hashes are stored in a file called `memory`, care should be made
-to avoid losing this file. Hashes (likely, but not entirely) guarantee that a
-transaction can only ever be recorded (ie: aggregated) a single time (assuming
-the `memory` file is never lost). **This includes memorizing seen transactions
-previous runs**.
+## Memory
 
-In theory, you could endlessly rerun the same report, but the result of
-all transactions will only be aggregated once. This is a convenience for
-not needing to track the "last transaction" manually.
+Note that the hashing function used to record seen transactions is imperfect.
+It is meant to be used as an optimistic convenience. In testing, this accounted
+for two misses on ~500,000 transactions.
 
-The hashing function used can be referenced [here](https://docs.rs/seahash/latest/seahash/reference/index.html).
+If there is a desire the lean on this feature in a larger way, a more precise hashing function
+can be used. This change would cause a non-trivial decrease in speed.
 
-If the need arises to make the application "forget" the transactions it has
-seen, you can delete the `memory` file and a fresh one will be created on the
-next run.
+## Text Encoding
 
-## Basic Usage
+Text that is invalid UTF-8 is replaced with `U+FFFD` which looks like: �.
 
-Double-clicking on the app will open a file browser where transactions
-reports can be selected for parsing. The file dialog will be filtered to only
-show files ending in `.csv` extensions.
+## Development
 
-Finished files will be placed in the same folder of the application and
-be named `OUTPUT_[time].tsv`. Time is roughly encoded to be a valid windows path.
-
-## Scripting Usage / CLI
-
-Scripting is partially supported by accepting a file path on the first
-positional argument.
-
-```shell
-dedupy transaction_report.csv
-```
-
-The application effectively functions as if the file was selected using the
-file browser. Results are **not** sent to stdout (maybe in the future).
-
-## Debugging / Tracing
-
-Logging filters can be set using the standard `RUST_LOG` environment variable.
-**Every** function is instrumented with tracing, additional logs are provided
-on logic-heavy paths.
+A path can be given in the first positional argument when driving the application
+through the command line.
 
 ```shell
-# This will show input and ouput logs for each row that is parsed.
-export RUST_LOG=dedupy=trace
-# If on powershell: $RUST_LOG="dedupy=trace"
-dedupy transaction_report.csv
+dedupy DownloadedTransactions.csv
 ```
-
-## TODO
-
-- [ ] At least a few tests.
-- [ ] Proper scripting support (ie, piping from stdin to stdout).
-
-## Benchmark
-
-A very informal benchmark on 11 months worth of transactions.
-
-**Input Transactions:** 232813
-**Resulting Aggregation:** 22877
-**Time to Complete:** 12.7637 milliseconds
