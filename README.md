@@ -5,6 +5,7 @@
 - Remembers unique transactions to avoid "double-dipping" into same lime item.
 - Remembers unique SKUs and notifies when a new item exists in the aggregation.
 
+
 ## Usage
 
 1. Download a transaction report from Amazon.
@@ -26,6 +27,15 @@
 1. The application can be forced to _forget_ previously seen items by deleting
    the memory file. These files will be replaced on the next run without
    records of any runs before that.
+
+## Memory
+
+Note that the hashing function used to record seen transactions is imperfect.
+It is meant to be used as an optimistic convenience. In testing, this accounted
+for two misses on ~500,000 transactions.
+
+If there is a desire the lean on this feature in a larger way, a more precise hashing function
+can be used. This change would cause a non-trivial decrease in speed.
 
 ## Text Encoding
 
