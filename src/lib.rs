@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
+#![feature(fs_try_exists)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -54,12 +55,14 @@ impl Memory {
     /// Returns a new [`Memory`] instance.
     fn new(path: &'static str) -> eyre::Result<Self> {
         let side_set = HashSet::<u64>::default();
-        let set = csv::Reader::from_path(path)
-            .and_then(|mut val| {
+        let set = if matches!(std::fs::try_exists(path), Ok(false)) {
+            Ok(HashSet::default())
+        } else {
+            csv::Reader::from_path(path).and_then(|mut val| {
                 val.deserialize::<u64>()
                     .collect::<Result<HashSet<u64>, _>>()
             })
-            .unwrap_or_default();
+        }?;
         Ok(Self {
             path,
             side_set,
